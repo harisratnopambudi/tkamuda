@@ -1394,7 +1394,7 @@
         <div class="progress-bar-fill" id="progressBar" style="width:0%"></div>
       </div>
     </div>
-    <div class="timer-box" id="timerBox">90:00</div>
+    <div class="timer-box" id="timerBox">--:--</div>
   </div>
 
   <div class="exam-body">
@@ -3083,16 +3083,26 @@ async function submitSulingjar() {
     if (!confirm(`Masih ada ${unanswered} pertanyaan yang belum diisi. Kirim sekarang?`)) return;
   }
 
+  // Guard: pastikan currentUser & currentClass tersedia
+  if (!currentUser || !currentClass) {
+    alert('Sesi sudah berakhir. Silakan login ulang.');
+    goToLogin();
+    return;
+  }
+
   const isDemo = (currentClass === DEMO_CLASS);
   showLoading('Menyimpan survei...');
   try {
     if (!isDemo) {
-      await sbUpsert('sulingjar', {
+      await sbUpsertSulingjar({
+        sulingjar_key: `${currentClass}::${currentUser}`,
         student_name: currentUser,
         class_name: currentClass,
         answers: sulingjarAnswers,
         submitted_at: new Date().toISOString()
       });
+      // Update status live monitor ke done setelah sulingjar selesai
+      await pushSulingjarProgress('done');
     }
   } catch(e) {
     console.warn('Sulingjar save error:', e);
@@ -3158,6 +3168,30 @@ const sbUpsert = (table, body) => fetch(`${SUPABASE_URL}/rest/v1/${table}`, {
   body: JSON.stringify(body)
 }).then(r => r.json());
 
+// Khusus untuk tabel results — upsert berdasarkan result_key (unique per siswa+paket)
+const sbUpsertResults = (body) => fetch(`${SUPABASE_URL}/rest/v1/results?on_conflict=result_key`, {
+  method: 'POST',
+  headers: {
+    'apikey': SUPABASE_KEY,
+    'Authorization': `Bearer ${SUPABASE_KEY}`,
+    'Content-Type': 'application/json',
+    'Prefer': 'resolution=merge-duplicates,return=representation'
+  },
+  body: JSON.stringify(body)
+}).then(r => r.json());
+
+// Khusus untuk tabel sulingjar — upsert berdasarkan sulingjar_key (unique per siswa+kelas)
+const sbUpsertSulingjar = (body) => fetch(`${SUPABASE_URL}/rest/v1/sulingjar?on_conflict=sulingjar_key`, {
+  method: 'POST',
+  headers: {
+    'apikey': SUPABASE_KEY,
+    'Authorization': `Bearer ${SUPABASE_KEY}`,
+    'Content-Type': 'application/json',
+    'Prefer': 'resolution=merge-duplicates,return=representation'
+  },
+  body: JSON.stringify(body)
+}).then(r => r.json());
+
 // ===================== APP STATE =====================
 let currentUser = null;
 let currentClass = null;
@@ -3206,11 +3240,12 @@ async function loadSettings() {
     const rows = await sbGet('settings', '?id=eq.1');
     if (rows && rows[0]) {
       _settings = rows[0];
+      // Pastikan duration selalu integer
+      if (_settings.duration) _settings.duration = parseInt(_settings.duration);
     }
   } catch(e) { console.warn('loadSettings error', e); }
   const el = document.getElementById('settingDuration');
   if (el) el.value = _settings.duration || 90;
-  timeLeft = (_settings.duration || 90) * 60;
 }
 
 async function getClasses() {
@@ -3308,37 +3343,38 @@ window.addEventListener('online', () => {
 });
 
 // ===================== SESSION RECOVERY (localStorage backup) =====================
-function sessionKey(nama, kelas) {
-  return `cbt_session_${kelas}_${nama}`;
+function sessionKey(nama, kelas, paket) {
+  const pk = paket || (ACTIVE_QUESTIONS === QUESTIONS_MAT2 ? '2' : ACTIVE_QUESTIONS === QUESTIONS_BI ? '3' : '1');
+  return `cbt_session_${kelas}_${nama}_${pk}`;
 }
 
 function saveSession() {
   if (!currentUser || !currentClass) return;
   try {
+    const currentPaket = (ACTIVE_QUESTIONS === QUESTIONS_MAT2) ? '2' : (ACTIVE_QUESTIONS === QUESTIONS_BI) ? '3' : '1';
     const data = {
       currentUser, currentClass,
       examAnswers, examOrder,
       timeLeft, currentQ,
       examStartTime,
-      paket: (ACTIVE_QUESTIONS === QUESTIONS_MAT2) ? '2' : (ACTIVE_QUESTIONS === QUESTIONS_BI) ? '3' : '1',
+      paket: currentPaket,
       savedAt: Date.now()
     };
-    localStorage.setItem(sessionKey(currentUser, currentClass), JSON.stringify(data));
+    localStorage.setItem(sessionKey(currentUser, currentClass, currentPaket), JSON.stringify(data));
   } catch(e) { console.warn('saveSession error', e); }
 }
 
-function clearSession(nama, kelas) {
-  try { localStorage.removeItem(sessionKey(nama, kelas)); } catch(e) {}
+function clearSession(nama, kelas, paket) {
+  try { localStorage.removeItem(sessionKey(nama, kelas, paket)); } catch(e) {}
 }
 
-function loadSession(nama, kelas) {
+function loadSession(nama, kelas, paket) {
   try {
-    const raw = localStorage.getItem(sessionKey(nama, kelas));
+    const raw = localStorage.getItem(sessionKey(nama, kelas, paket));
     if (!raw) return null;
     const data = JSON.parse(raw);
-    // Expired jika lebih dari 4 jam
     if (Date.now() - data.savedAt > 4 * 60 * 60 * 1000) {
-      clearSession(nama, kelas);
+      clearSession(nama, kelas, paket);
       return null;
     }
     return data;
@@ -3354,16 +3390,23 @@ function switchLoginTab(tab) {
 
 async function startExam() {
   const kelas = document.getElementById('selectKelas').value;
-  const nama = document.getElementById('selectSiswa').value;
+  const nama  = document.getElementById('selectSiswa').value;
   if (!kelas || !nama) return alert('Pilih kelas dan nama terlebih dahulu!');
 
+  // Selalu reload settings terbaru agar durasi ujian yang dipakai selalu akurat
+  await loadSettings();
+
   // Cek apakah ada sesi yang belum selesai di localStorage
-  const savedSession = loadSession(nama, kelas);
+  // Baca paket yang dipilih lebih awal agar bisa dipakai untuk sessionKey
+  const paketDipilih = document.getElementById('selectPaket').value;
+
+  const savedSession = loadSession(nama, kelas, paketDipilih);
   if (savedSession) {
     const answeredCount = savedSession.examOrder.filter(qIdx => {
       const ans = savedSession.examAnswers[qIdx];
       if (!ans) return false;
-      const q = ACTIVE_QUESTIONS[qIdx];
+      const q = resolveQuestions(paketDipilih)[qIdx];
+      if (!q) return false;
       if (q.type === 'single') return ans.choice !== undefined && ans.choice !== null;
       if (q.type === 'truefalse') return ans.tf && Object.keys(ans.tf).length === q.statements.length;
       if (q.type === 'multiselect') return ans.ms && ans.ms.length > 0;
@@ -3372,14 +3415,14 @@ async function startExam() {
     const menit = Math.floor(savedSession.timeLeft / 60);
     const detik = savedSession.timeLeft % 60;
     const waktuSisa = `${String(menit).padStart(2,'0')}:${String(detik).padStart(2,'0')}`;
+    const paketNama = paketDipilih === '2' ? 'Matematika 2' : paketDipilih === '3' ? 'Bahasa Indonesia' : 'Matematika 1';
     const lanjut = confirm(
-      `⚠️ Ditemukan sesi ujian yang belum selesai!\n\n` +
+      `⚠️ Ditemukan sesi ${paketNama} yang belum selesai!\n\n` +
       `Sudah dijawab: ${answeredCount} dari ${savedSession.examOrder.length} soal\n` +
       `Sisa waktu: ${waktuSisa}\n\n` +
       `Klik OK untuk LANJUTKAN dari soal terakhir\nKlik Batal untuk MULAI ULANG dari awal`
     );
     if (lanjut) {
-      // Restore sesi
       currentUser = savedSession.currentUser;
       currentClass = savedSession.currentClass;
       examAnswers = savedSession.examAnswers;
@@ -3388,10 +3431,11 @@ async function startExam() {
       examStartTime = Date.now() - (((_settings.duration || 90) * 60 - savedSession.timeLeft) * 1000);
       const resumePos = Math.min(savedSession.currentQ || 0, examOrder.length - 1);
 
-      // Restore paket soal
       ACTIVE_QUESTIONS = resolveQuestions(savedSession.paket);
       const badgeEl2 = document.getElementById('examPaketBadge');
       if (badgeEl2) badgeEl2.textContent = paketBadgeLabel(savedSession.paket);
+      const demoBanner = document.getElementById('demoBanner');
+      if (demoBanner) demoBanner.style.display = 'none';
 
       showScreen('examScreen');
       buildNav();
@@ -3400,32 +3444,38 @@ async function startExam() {
       hideLoading();
       renderQuestion(resumePos);
       startTimer();
-      // Tampilkan notif kecil
       showToast('✅ Sesi dilanjutkan! Jawaban sebelumnya sudah tersimpan.');
       return;
     } else {
-      // Hapus sesi lama, mulai baru
-      clearSession(nama, kelas);
+      clearSession(nama, kelas, paketDipilih);
     }
   }
 
   showLoading('Memeriksa data...');
-  // Mode demo: skip cek DB
   const isDemo = (kelas === DEMO_CLASS);
+  const paket = paketDipilih;
+  const paketPrefix = paket === '2' ? 'p2' : paket === '3' ? 'p3' : 'p1';
+
   if (!isDemo) {
     try {
-      const rows = await sbGet('results', `?student_name=eq.${encodeURIComponent(nama)}&class_name=eq.${encodeURIComponent(kelas)}`);
+      // Filter berdasarkan paket juga — beda paket = beda ujian, tidak saling ganggu
+      const rows = await sbGet('results',
+        `?student_name=eq.${encodeURIComponent(nama)}&class_name=eq.${encodeURIComponent(kelas)}&paket=eq.${paketPrefix}`
+      );
       hideLoading();
       if (rows && rows.length > 0) {
-        if (!confirm(`${nama} sudah mengerjakan ujian ini (Nilai: ${rows[0].score}). Kerjakan ulang?`)) return;
-        await sbDelete('results', `?student_name=eq.${encodeURIComponent(nama)}&class_name=eq.${encodeURIComponent(kelas)}`);
+        const paketLabel = paket === '2' ? 'Matematika 2' : paket === '3' ? 'Bahasa Indonesia' : 'Matematika 1';
+        if (!confirm(`${nama} sudah mengerjakan ${paketLabel} (Nilai: ${rows[0].score}). Kerjakan ulang?`)) return;
+        // Hapus hanya hasil paket ini, bukan semua hasil siswa
+        await sbDelete('results',
+          `?student_name=eq.${encodeURIComponent(nama)}&class_name=eq.${encodeURIComponent(kelas)}&paket=eq.${paketPrefix}`
+        );
       }
     } catch(e) { hideLoading(); }
   } else {
     hideLoading();
   }
 
-  const paket = document.getElementById('selectPaket').value;
   ACTIVE_QUESTIONS = resolveQuestions(paket);
 
   // Update badge paket di exam header
@@ -3716,15 +3766,17 @@ async function submitExam(timeout) {
   showLoading('Menyimpan hasil...');
   try {
     if (!isDemo) {
-      await sbUpsert('results', {
+      const pk = activePaketPrefix();
+      await sbUpsertResults({
+        result_key: `${currentClass}::${currentUser}::${pk}`,  // ← unique per siswa per paket
         student_name: currentUser,
         class_name: currentClass,
-        paket: activePaketPrefix(),
+        paket: pk,
         score, benar, salah, kosong, duration,
         answers: examAnswers,
         submitted_at: new Date().toISOString()
       });
-      clearSession(currentUser, currentClass);
+      clearSession(currentUser, currentClass, activePaketPrefix() === 'p2' ? '2' : activePaketPrefix() === 'p3' ? '3' : '1');
       await pushProgress('done');
     }
   } catch(e) { console.error('Save error', e); }
@@ -4323,11 +4375,19 @@ async function removeStudent(nama) {
 }
 
 async function resetStudentResult(nama) {
-  if (!confirm(`Reset hasil ujian ${nama}?`)) return;
+  const choice = confirm(
+    `Reset hasil ujian "${nama}"?\n\n` +
+    `OK = Reset SEMUA paket (Mat 1 + Mat 2 + B. Indo)\n` +
+    `Batal = Tidak jadi`
+  );
+  if (!choice) return;
   showLoading('Mereset...');
   try {
-    await sbDelete('results', `?student_name=eq.${encodeURIComponent(nama)}&class_name=eq.${encodeURIComponent(selectedAdminClass)}`);
+    await sbDelete('results',
+      `?student_name=eq.${encodeURIComponent(nama)}&class_name=eq.${encodeURIComponent(selectedAdminClass)}`
+    );
     hideLoading();
+    showToast(`✅ Hasil ujian ${nama} berhasil direset`);
     renderStudentTable();
     renderDashboard();
   } catch(e) { hideLoading(); alert('Gagal: ' + e.message); }
@@ -4702,10 +4762,11 @@ async function saveSettingsAuto() {
       shuffle_soal: shuffleSoal,
       demo_mode: demoMode
     });
-    _settings.show_score     = showScore;
+    _settings.duration        = dur;   // ← FIX: update duration di memori
+    _settings.show_score      = showScore;
     _settings.show_pembahasan = showPembahasan;
-    _settings.shuffle_soal   = shuffleSoal;
-    _settings.demo_mode      = demoMode;
+    _settings.shuffle_soal    = shuffleSoal;
+    _settings.demo_mode       = demoMode;
     _updateDemoInfoBox();
   } catch(e) { console.error('saveSettingsAuto error', e); }
 }

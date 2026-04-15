@@ -4719,13 +4719,12 @@ async function loadSettingsPanel() {
 async function saveSettings() {
   const dur = parseInt(document.getElementById('settingDuration').value);
   if (!dur || dur < 1) return alert('Masukkan durasi yang valid!');
-  const showScore    = document.getElementById('settingShowScore')?.checked !== false;
+  const showScore      = document.getElementById('settingShowScore')?.checked !== false;
   const showPembahasan = document.getElementById('settingShowPembahasan')?.checked === true;
-  const shuffleSoal  = document.getElementById('settingShuffleSoal')?.checked === true;
-  const demoMode     = document.getElementById('settingDemoMode')?.checked === true;
+  const shuffleSoal    = document.getElementById('settingShuffleSoal')?.checked === true;
+  const demoMode       = document.getElementById('settingDemoMode')?.checked === true;
   showLoading('Menyimpan...');
   try {
-    // Gunakan PATCH agar benar-benar update row id=1 (bukan insert baru)
     const res = await fetch(`${SUPABASE_URL}/rest/v1/settings?id=eq.1`, {
       method: 'PATCH',
       headers: {
@@ -4739,16 +4738,13 @@ async function saveSettings() {
         password: _settings.password || 'admin123',
         show_score: showScore,
         show_pembahasan: showPembahasan,
-        shuffle_soal: shuffleSoal,
-        demo_mode: demoMode
+        shuffle_soal: shuffleSoal
       })
     });
-    if (!res.ok) {
-      const errText = await res.text();
-      throw new Error('Supabase error: ' + errText);
-    }
-    const saved = await res.json();
-    // Kalau PATCH berhasil, saved[0].duration harus = dur
+    const rawText = await res.text();
+    if (!res.ok) throw new Error('HTTP ' + res.status + ': ' + rawText);
+    let saved = [];
+    try { saved = JSON.parse(rawText); } catch(e) {}
     const confirmedDur = saved && saved[0] ? parseInt(saved[0].duration) : dur;
     _settings.duration = confirmedDur;
     _settings.show_score = showScore;
@@ -4759,7 +4755,10 @@ async function saveSettings() {
     if (elDur) elDur.value = confirmedDur;
     hideLoading();
     alert('✅ Pengaturan berhasil disimpan! Durasi: ' + confirmedDur + ' menit');
-  } catch(e) { hideLoading(); alert('❌ Gagal menyimpan: ' + e.message); }
+  } catch(e) {
+    hideLoading();
+    alert('❌ Gagal menyimpan: ' + e.message);
+  }
 }
 
 async function saveSettingsAuto() {
@@ -4776,13 +4775,12 @@ async function saveSettingsAuto() {
       show_score: showScore,
       show_pembahasan: showPembahasan,
       shuffle_soal: shuffleSoal,
-      demo_mode: demoMode
+      // demo_mode dihapus — kolom tidak ada di tabel Supabase
     });
-    _settings.duration        = dur;   // ← FIX: update duration di memori
+    _settings.duration        = dur;
     _settings.show_score      = showScore;
     _settings.show_pembahasan = showPembahasan;
     _settings.shuffle_soal    = shuffleSoal;
-    _settings.demo_mode       = demoMode;
     _updateDemoInfoBox();
   } catch(e) { console.error('saveSettingsAuto error', e); }
 }

@@ -3241,8 +3241,9 @@ async function loadSettings() {
       if (_settings.duration) _settings.duration = parseInt(_settings.duration);
     }
   } catch(e) { console.warn('loadSettings error', e); }
+  // Selalu update input dengan nilai dari Supabase (bukan hardcode 90)
   const el = document.getElementById('settingDuration');
-  if (el) el.value = _settings.duration || 90;
+  if (el) el.value = _settings.duration ?? 90;
 }
 
 async function getClasses() {
@@ -4738,8 +4739,12 @@ async function saveSettings() {
     _settings.show_pembahasan = showPembahasan;
     _settings.shuffle_soal = shuffleSoal;
     _settings.demo_mode = demoMode;
+    // Verifikasi: reload dari Supabase dan update tampilan
+    await loadSettings();
+    const elDur = document.getElementById('settingDuration');
+    if (elDur) elDur.value = _settings.duration;
     hideLoading();
-    alert('✅ Pengaturan berhasil disimpan!');
+    alert('✅ Pengaturan berhasil disimpan! Durasi: ' + _settings.duration + ' menit');
   } catch(e) { hideLoading(); alert('Gagal: ' + e.message); }
 }
 
